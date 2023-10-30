@@ -1,5 +1,3 @@
-# TODO: In this cell, write your BaselineChallenge flow in the baseline_challenge.py file.
-
 from metaflow import (
     FlowSpec,
     step,
@@ -35,7 +33,7 @@ class ModelResult:
 class BaselineChallenge(FlowSpec):
     split_size = Parameter("split-sz", default=0.2)
     data = IncludeFile("data", default="data/womens_clothing_ecommerce_reviews.csv")
-    kfold = Parameter("k", default=5)
+    n_models = Parameter("n_models", default=15)
     scoring = Parameter("scoring", default="accuracy")
 
     @step
@@ -88,7 +86,19 @@ class BaselineChallenge(FlowSpec):
 
     @step
     def model_fanout(self):
-        self.hyperparam_set = [{"vocab_sz": 100}, {"vocab_sz": 300}, {"vocab_sz": 500}]
+        from sklearn.model_selection import ParameterSampler
+        param_sets = {
+            'batch_size': [8, 16, 32, 32],
+            'dense_sz': [10, 15, 20],
+            'dropout': [0.05, 0.1, 0.15],
+            'epochs': [10, 20, 30],
+            'lr': [0.001, 0.002, 0.005],
+            'max_df': [0.7, 0.75, 0.8],
+            'min_df': [0.001, 0.005, 0.01],
+            'vocab_sz': [100, 200, 300, 400, 500],
+        }
+        ps = ParameterSampler(param_sets, n_iter=self.n_models)
+        self.hyperparam_set = list(ps)
         print(f"Traing model for {len(self.hyperparam_set)} different hyperparam sets")
         self.next(self.model, foreach="hyperparam_set")
 
@@ -96,11 +106,14 @@ class BaselineChallenge(FlowSpec):
     def model(self):
         from model import NbowModel
 
+        model = NbowModel(**self.input)
+
         self._name = "model"
-        params = self.input
+        params = model.get_params()
         pathspec = f"{current.flow_name}/{current.run_id}/{current.step_name}/{current.task_id}"
 
-        model = NbowModel(**params)
+        print(f"Training model: {model}")
+        print(f" Params: {params}")
         model.fit(X=self.traindf["review"], y=self.traindf["label"])
 
         valy = self.valdf["label"]
@@ -122,9 +135,28 @@ class BaselineChallenge(FlowSpec):
         self.results = [i.result for i in inputs]
         self.next(self.aggregate)
 
+    def add_one(self, rows, result, df):
+        "A helper function to load results."
+        rows.append(
+            [
+                Markdown(result.name),
+                Artifact(result.params),
+                Artifact(result.pathspec),
+                Artifact(result.acc),
+                Artifact(result.rocauc),
+            ]
+        )
+        df["name"].append(result.name)
+        df["accuracy"].append(result.acc)
+        return rows, df
+
+    @card(type="corise")
     @step
     def aggregate(self, inputs):
         from itertools import chain
+        import seaborn as sns
+        import matplotlib.pyplot as plt
+        from matplotlib import rcParams
 
         def cmp(mr: ModelResult):
             if self.scoring == "accuracy":
@@ -134,13 +166,36 @@ class BaselineChallenge(FlowSpec):
 
         results = list(chain(*[i.results for i in inputs]))
         self.results = list(sorted(results, key=cmp, reverse=True))
+
+        rows = []
+        violin_plot_df = {"name": [], "accuracy": []}
+        for result in self.results:
+            print(result)
+            rows, violin_plot_df = self.add_one(rows, result, violin_plot_df)
+
+        current.card.append(Markdown("# All models from this flow run"))
+        current.card.append(
+            Table(
+                rows,
+                headers=["Model name", "Params", "Task pathspec", "Accuracy", "ROCAUC"],
+            )
+        )
+
+        fig, ax = plt.subplots(1, 1)
+        plt.xticks(rotation=40)
+        sns.violinplot(data=violin_plot_df, x="name", y="accuracy", ax=ax)
+        current.card.append(Image.from_matplotlib(fig))
+
         self.next(self.end)
 
     @step
     def end(self):
-        print(self.results)
         self.best_result = self.results[0]
-        print(f"Best Model: {self.best_result}")
+        print(f"Best Model: {self.best_result.name}")
+        print(f"  pathspec - {self.best_result.pathspec}")
+        print(f"  params   - {self.best_result.params}")
+        print(f"  bal-acc  - {self.best_result.acc}")
+        print(f"  roc-auc  - {self.best_result.rocauc}")
 
 
 if __name__ == "__main__":
