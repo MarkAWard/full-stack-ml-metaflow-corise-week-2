@@ -28,13 +28,14 @@ class ModelResult:
     pathspec: None
     acc: None
     rocauc: None
+    bal_acc: None
 
 
 class BaselineChallenge(FlowSpec):
     split_size = Parameter("split-sz", default=0.2)
     data = IncludeFile("data", default="data/womens_clothing_ecommerce_reviews.csv")
     n_models = Parameter("n_models", default=15)
-    scoring = Parameter("scoring", default="accuracy")
+    scoring = Parameter("scoring", default="bal_acc")
 
     @step
     def start(self):
@@ -67,7 +68,7 @@ class BaselineChallenge(FlowSpec):
     def baseline(self):
         "Compute the baseline"
         from sklearn.dummy import DummyClassifier
-        from sklearn.metrics import balanced_accuracy_score, roc_auc_score
+        from sklearn.metrics import balanced_accuracy_score, roc_auc_score, accuracy_score
 
         baseline_clf = DummyClassifier()
 
@@ -78,10 +79,11 @@ class BaselineChallenge(FlowSpec):
         baseline_clf.fit(self.traindf, y=self.traindf.label)
 
         predictions = baseline_clf.predict_proba(self.valdf)[:,1]
-        acc = balanced_accuracy_score(self.valdf.label, predictions > 0.5, adjusted=True)
+        acc = accuracy_score(self.valdf.label, predictions > 0.5)
+        bal_acc = balanced_accuracy_score(self.valdf.label, predictions > 0.5, adjusted=True)
         rocauc = roc_auc_score(self.valdf.label, predictions)
 
-        self.results = [ModelResult(repr(baseline_clf), params, pathspec, acc, rocauc)]
+        self.results = [ModelResult(repr(baseline_clf), params, pathspec, acc, rocauc, bal_acc)]
         self.next(self.aggregate)
 
     @step
@@ -95,7 +97,7 @@ class BaselineChallenge(FlowSpec):
             'lr': [0.001, 0.002, 0.005],
             'max_df': [0.7, 0.75, 0.8],
             'min_df': [0.001, 0.005, 0.01],
-            'vocab_sz': [100, 200, 300, 400, 500],
+            'vocab_sz': [250, 300, 350, 400],
         }
         ps = ParameterSampler(param_sets, n_iter=self.n_models)
         self.hyperparam_set = list(ps)
@@ -119,6 +121,7 @@ class BaselineChallenge(FlowSpec):
         valy = self.valdf["label"]
         predictions = model.predict(self.valdf["review"])
         acc = model.eval_acc(valy, predictions)
+        bal_acc = model.eval_bal_acc(valy, predictions)
         rocauc = model.eval_rocauc(valy, predictions)
         self.result = ModelResult(
             repr(model),
@@ -126,6 +129,7 @@ class BaselineChallenge(FlowSpec):
             pathspec,
             acc,
             rocauc,
+            bal_acc,
         )
 
         self.next(self.join)
@@ -142,49 +146,58 @@ class BaselineChallenge(FlowSpec):
                 Markdown(result.name),
                 Artifact(result.params),
                 Artifact(result.pathspec),
+                Artifact(result.bal_acc),
                 Artifact(result.acc),
                 Artifact(result.rocauc),
             ]
         )
         df["name"].append(result.name)
         df["accuracy"].append(result.acc)
+        df["bal_acc"].append(result.bal_acc)
+        df["roc_auc"].append(result.rocauc)
         return rows, df
 
     @card(type="corise")
     @step
     def aggregate(self, inputs):
+        from collections import defaultdict
         from itertools import chain
         import seaborn as sns
         import matplotlib.pyplot as plt
         from matplotlib import rcParams
 
         def cmp(mr: ModelResult):
-            if self.scoring == "accuracy":
-                return mr.acc
-            else:
-                return mr.rocauc
+            return getattr(mr, self.scoring)
 
         results = list(chain(*[i.results for i in inputs]))
         self.results = list(sorted(results, key=cmp, reverse=True))
 
         rows = []
-        violin_plot_df = {"name": [], "accuracy": []}
+        violin_plot_df = defaultdict(list)
         for result in self.results:
             print(result)
             rows, violin_plot_df = self.add_one(rows, result, violin_plot_df)
+        self.plot_df = violin_plot_df
 
         current.card.append(Markdown("# All models from this flow run"))
         current.card.append(
             Table(
                 rows,
-                headers=["Model name", "Params", "Task pathspec", "Accuracy", "ROCAUC"],
+                headers=["Model name", "Params", "Task pathspec", "Bal Accuracy", "Accuracy", "ROCAUC"],
             )
         )
 
-        fig, ax = plt.subplots(1, 1)
-        plt.xticks(rotation=40)
-        sns.violinplot(data=violin_plot_df, x="name", y="accuracy", ax=ax)
-        current.card.append(Image.from_matplotlib(fig))
+        rcParams.update({"figure.autolayout": True})
+        
+        fig1, ax1 = plt.subplots(1, 1)
+        plt.xticks(rotation=90)
+        sns.violinplot(data=violin_plot_df, x="name", y="accuracy", ax=ax1)
+        current.card.append(Image.from_matplotlib(fig1))
+
+        fig2, ax2 = plt.subplots(1, 1, figsize=(10,10))
+        sns.scatterplot(data=violin_plot_df, x="bal_acc", y="roc_auc", size="accuracy", hue="name", alpha=0.5, ax=ax2)
+        plt.tight_layout()
+        current.card.append(Image.from_matplotlib(fig2))
 
         self.next(self.end)
 
@@ -194,7 +207,8 @@ class BaselineChallenge(FlowSpec):
         print(f"Best Model: {self.best_result.name}")
         print(f"  pathspec - {self.best_result.pathspec}")
         print(f"  params   - {self.best_result.params}")
-        print(f"  bal-acc  - {self.best_result.acc}")
+        print(f"  acc      - {self.best_result.acc}")
+        print(f"  bal-acc  - {self.best_result.bal_acc}")
         print(f"  roc-auc  - {self.best_result.rocauc}")
 
 
