@@ -2,7 +2,7 @@
 import tensorflow as tf
 from tensorflow.keras import layers, optimizers, regularizers
 from sklearn.base import BaseEstimator, ClassifierMixin
-from sklearn.metrics import balanced_accuracy_score, roc_auc_score
+from sklearn.metrics import balanced_accuracy_score, roc_auc_score, accuracy_score
 from sklearn.feature_extraction.text import CountVectorizer
 
 
@@ -67,6 +67,9 @@ class NbowModel(BaseEstimator):
         return self.model.predict(res)
 
     def eval_acc(self, labels, pred, threshold=0.5):
+        return accuracy_score(labels, pred > threshold)
+
+    def eval_bal_acc(self, labels, pred, threshold=0.5):
         return balanced_accuracy_score(labels, pred > threshold, adjusted=True)
 
     def eval_rocauc(self, labels, pred):
