@@ -162,6 +162,7 @@ class BaselineChallenge(FlowSpec):
     def aggregate(self, inputs):
         from collections import defaultdict
         from itertools import chain
+        import pandas as pd
         import seaborn as sns
         import matplotlib.pyplot as plt
         from matplotlib import rcParams
@@ -195,8 +196,17 @@ class BaselineChallenge(FlowSpec):
         current.card.append(Image.from_matplotlib(fig1))
 
         fig2, ax2 = plt.subplots(1, 1, figsize=(10,10))
-        sns.scatterplot(data=violin_plot_df, x="bal_acc", y="roc_auc", size="accuracy", hue="name", alpha=0.5, ax=ax2)
-        plt.tight_layout()
+        data = pd.DataFrame([
+            {"accuracy": r.acc, "roc_auc": r.rocauc, "bal_acc": r.bal_acc, **r.params}
+            for r in self.results
+            if "Dummy" not in r.name
+        ])
+        markers = {10: ".", 15: "X", 20: "s"}
+        sns.scatterplot(
+            data=data, ax=ax2, sizes=(10,200),
+            x="roc_auc", y="bal_acc", size="vocab_sz", hue="epochs",
+            style="dense_sz", markers=markers,
+        )
         current.card.append(Image.from_matplotlib(fig2))
 
         self.next(self.end)
